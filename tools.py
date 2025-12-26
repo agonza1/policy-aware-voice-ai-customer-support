@@ -4,7 +4,9 @@ This module contains all backend actions that have side effects.
 These tools are ONLY accessible through explicit LangGraph routing.
 """
 
+import html
 import os
+import re
 from typing import Optional
 
 from loguru import logger
@@ -90,13 +92,22 @@ def forward_call_to_agent(call_sid: str, support_phone_number: str) -> bool:
     """
     logger.info(f"Forwarding call {call_sid} to agent at {support_phone_number}")
     
+    # Validate phone number format to prevent TwiML injection
+    # Allow only digits, plus sign, hyphens, parentheses, and spaces
+    if not re.match(r'^[\d\s\+\-\(\)]+$', support_phone_number):
+        logger.error(f"Invalid phone number format: {support_phone_number}")
+        return False
+    
+    # Escape the phone number for defense in depth (handles any edge cases)
+    safe_phone_number = html.escape(support_phone_number, quote=True)
+    
     try:
         client = get_twilio_client()
         call = client.calls(call_sid)
         
         # Update the call to redirect to the support number
         call.update(
-            twiml=f'<Response><Dial>{support_phone_number}</Dial></Response>'
+            twiml=f'<Response><Dial>{safe_phone_number}</Dial></Response>'
         )
         
         logger.info(f"Successfully forwarded call {call_sid} to {support_phone_number}")

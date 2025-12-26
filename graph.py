@@ -49,7 +49,7 @@ def extract_intent(state: GraphState) -> GraphState:
         return {**state, "intent": None}
     
     # Initialize LLM for intent extraction
-    llm = ChatOpenAI(model="gpt-4.1-mini", temperature=0.1)
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.1)
     
     # Extract intent
     messages = [

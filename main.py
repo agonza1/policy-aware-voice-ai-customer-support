@@ -5,6 +5,7 @@ This module provides:
 - WebSocket /ws - Audio streaming endpoint for Pipecat pipeline
 """
 
+import html
 import json
 import os
 from typing import Optional
@@ -50,10 +51,13 @@ async def start_call(request: Request):
     
     logger.info(f"Generated WebSocket URL: {ws_url}")
     
+    # Escape the URL to prevent XML injection attacks
+    safe_ws_url = html.escape(ws_url, quote=True)
+    
     xml_content = f'''<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="{ws_url}"></Stream>
+    <Stream url="{safe_ws_url}"></Stream>
   </Connect>
   <Pause length="40"/>
 </Response>'''
