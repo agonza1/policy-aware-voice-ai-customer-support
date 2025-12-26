@@ -51,6 +51,15 @@ The system enforces strict boundaries:
 - Voice pipeline delivers responses
 - Tools are only accessible through explicit LangGraph routing
 
+### LLM Roles
+
+Two distinct LLM instances:
+
+1. **Bot LLM** (`bot.py`): Handles conversation flow and natural language responses. No execution authority.
+2. **LangGraph LLM** (`graph.py`): Extracts intent only (returns structured JSON). No decisions or actions.
+
+Policy decisions and tool execution are handled exclusively by LangGraph's state machine.
+
 ## Prerequisites
 
 - Python 3.10 or higher
@@ -143,10 +152,10 @@ Ensure:
 ## Technology Stack
 
 - **FastAPI** - Web framework and WebSocket server
-- **Pipecat** (v0.0.98) - Real-time audio processing pipeline ([API Reference](https://reference-server.pipecat.ai/en/latest/))
+- **Pipecat** (v0.0.63) - Real-time audio processing pipeline ([API Reference](https://reference-server.pipecat.ai/en/latest/))
 - **Twilio** - Call webhooks, audio streaming, and live call forwarding
 - **Deepgram** - Speech-to-Text (STT)
-- **OpenAI** - Intent extraction (LLM) and Text-to-Speech (TTS)
+- **OpenAI** - Bot LLM (conversation) and LangGraph LLM (intent extraction)
 - **Cartesia** - Alternative Text-to-Speech provider
 - **LangGraph** - Explicit decision & execution plane for policy enforcement
 - **LangSmith** (optional) - Tracing and debugging
@@ -175,7 +184,7 @@ For detailed documentation, see the [`docs/`](./docs/) directory:
 2. **Webhook**: Twilio sends a POST request to `/`, server responds with TwiML pointing to `/ws`
 3. **WebSocket Connection**: Twilio establishes WebSocket connection for bidirectional audio
 4. **Case Collection**: Agent asks for case number (required for any actions)
-5. **Intent Extraction**: User asks "Why is my case still open?" → LLM extracts intent only
+5. **Intent Extraction**: User asks "Why is my case still open?" → LangGraph LLM extracts intent only (structured JSON)
 6. **Policy Evaluation**: LangGraph evaluates policy rules (default-deny)
 7. **Execution**: Routes to appropriate outcome:
    - Read-only case status (spoken)
