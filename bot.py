@@ -93,7 +93,7 @@ async def main(websocket_client, stream_sid: str, call_sid: Optional[str] = None
     stt = DeepgramSTTService(
         api_key=deepgram_api_key,
         live_options=LiveOptions(
-            model="nova-2",
+            model="nova-3",
             language="en-US",
         ),
     )
