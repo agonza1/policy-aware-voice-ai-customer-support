@@ -27,6 +27,7 @@ from pipecat.transports.network.fastapi_websocket import (
     FastAPIWebsocketParams,
 )
 
+from case_extraction import extract_case_number
 from graph import run_graph
 from prompts import INTENT_EXTRACTION_PROMPT
 
@@ -148,6 +149,7 @@ async def main(websocket_client, stream_sid: str, call_sid: Optional[str] = None
         "call_sid": call_sid,
         "escalated": False,
         "case_number_extracted_after_inquiry": False,  # Track if we already re-ran LangGraph after extracting case number
+        "escalation_processed": False,  # Track if we've already processed an escalation request
     }
     
     # Create pipeline
@@ -194,69 +196,10 @@ async def main(websocket_client, stream_sid: str, call_sid: Optional[str] = None
                 
                 # Extract case number if not already collected
                 if not conversation_state["case_number_collected"]:
-                    import re
-                    
-                    # First try regex patterns for written formats
-                    case_patterns = [
-                        r'\b[A-Z]{2,}-\d+\b',  # ABC-123
-                        r'\b\d{4,}\b',  # 12345
-                        r'\bVIP-\d+\b',  # VIP-001
-                    ]
-                    
-                    for pattern in case_patterns:
-                        match = re.search(pattern, latest_user_text.upper())
-                        if match:
-                            conversation_state["case_number"] = match.group(0)
-                            conversation_state["case_number_collected"] = True
-                            logger.info(f"Extracted case number: {conversation_state['case_number']}")
-                            break
-                    
-                    # If no match, try to extract spoken numbers (one two three four -> 1234)
-                    if not conversation_state["case_number_collected"]:
-                        word_to_digit = {
-                            "zero": "0", "oh": "0", "o": "0",
-                            "one": "1", "two": "2", "three": "3", "four": "4",
-                            "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9"
-                        }
-                        
-                        # Look for patterns like "case number is one two three four"
-                        case_number_patterns = [
-                            r"case\s+number\s+is\s+([a-z\s]+)",
-                            r"case\s+number\s+([a-z\s]+)",
-                            r"number\s+is\s+([a-z\s]+)",
-                        ]
-                        
-                        for pattern in case_number_patterns:
-                            match = re.search(pattern, latest_user_text.lower())
-                            if match:
-                                words = match.group(1).strip().split()
-                                digits = ""
-                                for word in words:
-                                    if word in word_to_digit:
-                                        digits += word_to_digit[word]
-                                    elif word.isdigit():
-                                        digits += word
-                                
-                                if len(digits) >= 4:  # At least 4 digits for a case number
-                                    conversation_state["case_number"] = digits
-                                    conversation_state["case_number_collected"] = True
-                                    logger.info(f"Extracted case number from spoken digits: {conversation_state['case_number']}")
-                                    break
-                        
-                        if not conversation_state["case_number_collected"]:
-                            # Try to extract any sequence of 4+ digits or number words
-                            tokens = re.findall(r'\b(?:\d+|[a-z]+)\b', latest_user_text.lower())
-                            digits = ""
-                            for token in tokens:
-                                if token.isdigit():
-                                    digits += token
-                                elif token in word_to_digit:
-                                    digits += word_to_digit[token]
-                            
-                            if len(digits) >= 4:
-                                conversation_state["case_number"] = digits
-                                conversation_state["case_number_collected"] = True
-                                logger.info(f"Extracted case number from mixed format: {conversation_state['case_number']}")
+                    case_number = extract_case_number(latest_user_text)
+                    if case_number:
+                        conversation_state["case_number"] = case_number
+                        conversation_state["case_number_collected"] = True
                 
                 # If we just extracted a case number and inquiry was already processed (without case number),
                 # reset inquiry_processed to re-run LangGraph with the case number (only once)
@@ -280,7 +223,16 @@ async def main(websocket_client, stream_sid: str, call_sid: Optional[str] = None
                         )
                         
                         conversation_state["inquiry_processed"] = True
-                        conversation_state["escalated"] = result.get("escalated", False)
+                        escalated = result.get("escalated", False)
+                        conversation_state["escalated"] = escalated
+                        
+                        # If escalation succeeded, stop the bot immediately
+                        if escalated:
+                            logger.info("Escalation successful - stopping bot pipeline")
+                            # Send EndFrame to stop the pipeline and allow transfer to proceed
+                            await task.queue_frames([EndFrame()])
+                            # Break out of monitoring loop since call is being transferred
+                            break
                         
                         # If LangGraph generated a response, inject it into the conversation
                         response_text = result.get("response_text")
@@ -293,14 +245,16 @@ async def main(websocket_client, stream_sid: str, call_sid: Optional[str] = None
                     except Exception as e:
                         logger.error(f"Error in LangGraph processing: {e}", exc_info=True)
                 
-                # Check for escalation requests
-                if not conversation_state["escalated"]:
+                # Check for escalation requests (only if not already processed)
+                if not conversation_state["escalated"] and not conversation_state["escalation_processed"]:
                     escalation_keywords = [
                         "escalate", "agent", "human", "representative", "speak to someone",
                         "talk to a person", "transfer", "manager", "supervisor"
                     ]
                     if any(keyword in latest_user_text.lower() for keyword in escalation_keywords):
                         logger.info("Escalation requested by user")
+                        # Mark as processed to prevent loops
+                        conversation_state["escalation_processed"] = True
                         # Route to LangGraph for escalation decision
                         try:
                             result = run_graph(
@@ -308,9 +262,20 @@ async def main(websocket_client, stream_sid: str, call_sid: Optional[str] = None
                                 case_number=conversation_state.get("case_number"),
                                 call_sid=call_sid,
                             )
-                            conversation_state["escalated"] = result.get("escalated", False)
-                            if conversation_state["escalated"]:
-                                logger.info("Call escalated via LangGraph")
+                            escalated = result.get("escalated", False)
+                            conversation_state["escalated"] = escalated
+                            if escalated:
+                                logger.info("Call escalated via LangGraph - stopping bot pipeline")
+                                # Send EndFrame to stop the pipeline and allow transfer to proceed
+                                await task.queue_frames([EndFrame()])
+                                # Break out of monitoring loop since call is being transferred
+                                break
+                            else:
+                                # Escalation was denied - speak the denial message
+                                response_text = result.get("response_text")
+                                if response_text:
+                                    logger.info(f"Escalation denied - speaking response: {response_text}")
+                                    await task.queue_frames([TextFrame(text=response_text)])
                         except Exception as e:
                             logger.error(f"Error in escalation: {e}", exc_info=True)
                 

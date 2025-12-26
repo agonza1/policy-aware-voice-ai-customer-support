@@ -83,7 +83,7 @@ def forward_call_to_agent(call_sid: str, support_phone_number: str) -> bool:
     
     Args:
         call_sid: The Twilio Call SID to forward
-        support_phone_number: The phone number to forward to
+        support_phone_number: The phone number to forward to (not used directly, but validated)
         
     Returns:
         bool: True if forwarding was successful, False otherwise
@@ -94,15 +94,35 @@ def forward_call_to_agent(call_sid: str, support_phone_number: str) -> bool:
         client = get_twilio_client()
         call = client.calls(call_sid)
         
-        # Update the call to redirect to the support number
-        call.update(
-            twiml=f'<Response><Dial>{support_phone_number}</Dial></Response>'
-        )
+        # Get the base URL for the transfer endpoint
+        # Prefer BASE_URL environment variable, otherwise derive from WEBSOCKET_URL
+        base_url = os.getenv("BASE_URL")
+        if not base_url:
+            websocket_url = os.getenv("WEBSOCKET_URL", "")
+            if websocket_url:
+                # Remove /ws suffix if present and convert wss:// to https://
+                base_url = websocket_url.replace("/ws", "").rstrip("/")
+                # Convert WebSocket scheme to HTTP scheme
+                if base_url.startswith("wss://"):
+                    base_url = base_url.replace("wss://", "https://", 1)
+                elif base_url.startswith("ws://"):
+                    base_url = base_url.replace("ws://", "http://", 1)
+            else:
+                # Last resort: This should ideally be set via BASE_URL environment variable
+                logger.error("BASE_URL and WEBSOCKET_URL not set - transfer will fail")
+                raise ValueError("BASE_URL or WEBSOCKET_URL must be set for call transfer")
         
-        logger.info(f"Successfully forwarded call {call_sid} to {support_phone_number}")
+        transfer_url = f"{base_url}/transfer"
+        logger.info(f"Using transfer URL: {transfer_url}")
+        
+        # Use URL parameter instead of inline TwiML for more reliable call transfers
+        # This is the recommended approach for active calls
+        call.update(url=transfer_url, method="POST")
+        
+        logger.info(f"Successfully initiated transfer for call {call_sid} to {support_phone_number}")
         return True
         
     except Exception as e:
-        logger.error(f"Failed to forward call {call_sid}: {str(e)}")
+        logger.error(f"Failed to forward call {call_sid}: {str(e)}", exc_info=True)
         return False
 

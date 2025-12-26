@@ -147,6 +147,9 @@ def escalate_node(state: GraphState) -> GraphState:
     """Handle call escalation (REAL SIDE EFFECT)."""
     call_sid = state.get("call_sid")
     support_phone_number = os.getenv("SUPPORT_PHONE_NUMBER")
+    auth_level = state.get("auth_level")
+    
+    logger.info(f"Escalation approved by policy (auth_level={auth_level})")
     
     if not call_sid:
         logger.error("Cannot escalate: no call_sid in state")

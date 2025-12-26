@@ -98,6 +98,34 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.close()
 
 
+@app.post("/transfer")
+async def transfer_call(request: Request):
+    """TwiML endpoint for call transfer to human agent."""
+    support_phone_number = os.getenv("SUPPORT_PHONE_NUMBER")
+    
+    if not support_phone_number:
+        logger.error("SUPPORT_PHONE_NUMBER not configured for transfer")
+        xml_content = '''<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>I'm sorry, transfer is not available at this time.</Say>
+  <Hangup/>
+</Response>'''
+    else:
+        logger.info(f"Transferring call to {support_phone_number}")
+        # Use Dial with proper attributes for call transfer
+        xml_content = f'''<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>Please hold while I transfer you to an agent.</Say>
+  <Dial timeout="30" record="false" answerOnMedia="false">
+    <Number>{support_phone_number}</Number>
+  </Dial>
+  <Say>I'm sorry, the agent is not available. Please try again later.</Say>
+  <Hangup/>
+</Response>'''
+    
+    return HTMLResponse(content=xml_content, media_type="application/xml")
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""

@@ -23,21 +23,107 @@ This system demonstrates **default-deny execution** for Voice AI by:
 
 ## Architecture
 
+```mermaid
+flowchart TB
+    subgraph "Twilio"
+        TC[Incoming Call]
+        TW[Twilio WebSocket]
+    end
+    
+    subgraph "FastAPI Server"
+        WH[Webhook Handler<br/>POST /]
+        WS[WebSocket Endpoint<br/>/ws]
+    end
+    
+    subgraph "Pipecat Voice Pipeline"
+        direction LR
+        IN[WebSocket Input]
+        STT[STT Service<br/>Deepgram]
+        CTX[Context Aggregator]
+        LLM[Bot LLM<br/>OpenAI GPT-4o-mini]
+        TTS[TTS Service<br/>Cartesia]
+        OUT[WebSocket Output]
+        
+        IN --> STT
+        STT --> CTX
+        CTX --> LLM
+        LLM --> TTS
+        TTS --> OUT
+    end
+    
+    subgraph "Background Monitor Task"
+        MON[monitor_messages<br/>Runs every 2s]
+        EXTRACT[Extract Case Number<br/>Regex + Spoken Numbers]
+        ROUTE[Route to LangGraph]
+    end
+    
+    subgraph "LangGraph Decision Plane"
+        direction TB
+        START[run_graph]
+        INTENT[extract_intent<br/>LLM extracts intent only]
+        POLICY[evaluate_policy<br/>Check auth level]
+        ROUTER{route_decision}
+        STATUS[status_node<br/>Read-only]
+        ESCALATE[escalate_node<br/>Side effect]
+        DENY[deny_node]
+        
+        START --> INTENT
+        INTENT --> POLICY
+        POLICY --> ROUTER
+        ROUTER -->|allow_status| STATUS
+        ROUTER -->|allow_escalate| ESCALATE
+        ROUTER -->|deny| DENY
+        STATUS --> END_NODE[END]
+        ESCALATE --> END_NODE
+        DENY --> END_NODE
+    end
+    
+    subgraph "Tools & Actions"
+        GET_STATUS[get_case_status<br/>Read-only tool]
+        FORWARD[forward_call_to_agent<br/>Twilio API]
+    end
+    
+    subgraph "Response Flow"
+        RESP[Response Text]
+        TEXT_FRAME[TextFrame]
+    end
+    
+    TC -->|POST /| WH
+    WH -->|TwiML| TW
+    TW <-->|WebSocket| WS
+    WS <-->|Audio Stream| IN
+    OUT -->|Audio Stream| WS
+    
+    CTX -.->|Monitor Messages| MON
+    MON --> EXTRACT
+    EXTRACT --> ROUTE
+    ROUTE -->|user_input, case_number, call_sid| START
+    START -.->|response_text, escalated| RESP
+    RESP --> TEXT_FRAME
+    TEXT_FRAME -->|Queue Frame| TTS
+    
+    STATUS --> GET_STATUS
+    ESCALATE --> FORWARD
+    FORWARD -->|Call Transfer| TW
+    
+    style START fill:#e1f5ff
+    style INTENT fill:#fff4e1
+    style POLICY fill:#ffe1f5
+    style STATUS fill:#e1ffe1
+    style ESCALATE fill:#ffe1e1
+    style DENY fill:#ffcccc
+    style MON fill:#f0f0f0
+    style ROUTE fill:#f0f0f0
 ```
-Twilio Call
-    ↓
-FastAPI (POST /) → TwiML (WebSocket URL)
-    ↓
-WebSocket (/ws)
-    ↓
-Pipecat Voice Pipeline
-├── STT (Deepgram)
-├── Intent Extraction (OpenAI LLM)
-├── Decision & Routing (LangGraph)
-└── TTS (OpenAI / Cartesia)
-    ↓
-Spoken Response OR Real Escalation (Twilio Call Forward)
-```
+
+### Architecture Flow
+
+1. **Call Initiation**: Twilio receives call → FastAPI webhook returns TwiML → WebSocket connection established
+2. **Voice Pipeline**: Audio flows through Pipecat: STT → Context → Bot LLM → TTS
+3. **Background Monitoring**: Monitor task watches conversation, extracts case numbers, routes to LangGraph
+4. **Policy Decision**: LangGraph extracts intent → evaluates policy → routes to appropriate action node
+5. **Execution**: Tools execute (read-only status lookup or call escalation)
+6. **Response**: LangGraph response injected as TextFrame → TTS → spoken to user
 
 ### Architectural Principle
 
