@@ -5,16 +5,25 @@ These tools are ONLY accessible through explicit LangGraph routing.
 """
 
 import os
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional
+from xml.sax.saxutils import escape
 
-from loguru import logger
-from twilio.rest import Client
+try:
+    from loguru import logger  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    # Allow importing/test-running the read-only tools without optional deps.
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:  # pragma: no cover
+    from twilio.rest import Client  # noqa: F401
 
 # Initialize Twilio client
-_twilio_client: Optional[Client] = None
+_twilio_client: Optional[Any] = None
 
 
-def get_twilio_client() -> Client:
+def get_twilio_client():
     """Get or create Twilio client."""
     global _twilio_client
     if _twilio_client is None:
@@ -22,7 +31,15 @@ def get_twilio_client() -> Client:
         auth_token = os.getenv("TWILIO_AUTH_TOKEN")
         if not account_sid or not auth_token:
             raise ValueError("TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN must be set")
-        _twilio_client = Client(account_sid, auth_token)
+        try:
+            from twilio.rest import Client as TwilioClient  # type: ignore
+        except ModuleNotFoundError as e:  # pragma: no cover
+            raise RuntimeError(
+                "The 'twilio' package is required for call forwarding. "
+                "Install project dependencies (e.g. `pip install .`)."
+            ) from e
+
+        _twilio_client = TwilioClient(account_sid, auth_token)
     return _twilio_client
 
 
@@ -38,7 +55,9 @@ def get_case_status(case_number: str) -> dict:
     Returns:
         dict: Case status information
     """
-    logger.info(f"Looking up case status for case: {case_number}")
+    normalized_case_number = case_number.strip()
+    normalized_key = normalized_case_number.upper()
+    logger.info(f"Looking up case status for case: {normalized_case_number}")
     
     # Mock case status for PoC
     # In production, this would query a real database/API
@@ -61,9 +80,9 @@ def get_case_status(case_number: str) -> dict:
     
     # Return mock data or default
     status = mock_statuses.get(
-        case_number,
+        normalized_key,
         {
-            "case_number": case_number,
+            "case_number": normalized_case_number,
             "status": "unknown",
             "reason": "Case not found in system",
             "opened_date": "unknown",
@@ -96,7 +115,7 @@ def forward_call_to_agent(call_sid: str, support_phone_number: str) -> bool:
         
         # Update the call to redirect to the support number
         call.update(
-            twiml=f'<Response><Dial>{support_phone_number}</Dial></Response>'
+            twiml=f"<Response><Dial>{escape(support_phone_number)}</Dial></Response>"
         )
         
         logger.info(f"Successfully forwarded call {call_sid} to {support_phone_number}")

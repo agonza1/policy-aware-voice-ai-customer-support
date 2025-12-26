@@ -18,12 +18,28 @@ dependencies = [
     "pydantic>=2.5.0"
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pyright>=1.1.404,<2",
+    "ruff>=0.12.11,<1",
+    "pytest>=7.4.0",
+]
+
 [dependency-groups]
 dev = [
     "pyright>=1.1.404,<2",
     "ruff>=0.12.11,<1",
     "pytest>=7.4.0",
 ]
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# This repo is a "flat layout" with multiple top-level modules.
+# Explicitly listing them avoids setuptools refusing to build/editable-install.
+py-modules = ["bot", "tools", "graph", "policies", "main", "prompts"]
 
 [tool.ruff]
 line-length = 100

@@ -7,7 +7,7 @@ This module provides:
 
 import json
 import os
-from typing import Optional
+from xml.sax.saxutils import quoteattr
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, WebSocket
@@ -22,10 +22,27 @@ load_dotenv()
 
 app = FastAPI(title="Policy-aware Voice AI Customer Support PoC")
 
+def _parse_csv_env(name: str) -> list[str]:
+    value = os.getenv(name, "")
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+cors_allow_origins = _parse_csv_env("CORS_ALLOW_ORIGINS") or ["*"]
+cors_allow_credentials = os.getenv("CORS_ALLOW_CREDENTIALS", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+
+# Starlette/FastAPI CORS behavior + browser spec:
+# wildcard origins cannot be combined with credentials safely.
+if "*" in cors_allow_origins:
+    cors_allow_credentials = False
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for testing
-    allow_credentials=True,
+    allow_origins=cors_allow_origins,
+    allow_credentials=cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -39,13 +56,21 @@ async def start_call(request: Request):
     # Use environment variable if set, otherwise construct from request
     ws_url = os.getenv("WEBSOCKET_URL")
     if not ws_url:
-        forwarded_proto = request.headers.get("x-forwarded-proto")
+        forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
         is_https = forwarded_proto == "https" or request.url.scheme == "https"
         scheme = "wss" if is_https else "ws"
-        host = request.headers.get('host') or request.headers.get('x-forwarded-host')
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host")
         if not host:
             logger.error("Cannot determine host for WebSocket URL")
             host = "localhost:8000"
+
+        allowed_hosts = _parse_csv_env("ALLOWED_HOSTS")
+        if allowed_hosts and host not in allowed_hosts:
+            logger.warning(
+                f"Rejected Host header {host!r}; allowed hosts: {allowed_hosts}. "
+                "Set WEBSOCKET_URL to override."
+            )
+            host = allowed_hosts[0]
         ws_url = f"{scheme}://{host}/ws"
     
     logger.info(f"Generated WebSocket URL: {ws_url}")
@@ -53,7 +78,7 @@ async def start_call(request: Request):
     xml_content = f'''<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="{ws_url}"></Stream>
+    <Stream url={quoteattr(ws_url)}></Stream>
   </Connect>
   <Pause length="40"/>
 </Response>'''
