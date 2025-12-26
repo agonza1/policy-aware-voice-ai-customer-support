@@ -1,0 +1,219 @@
+# Policy-Aware Voice AI Customer Support — Cursor Rules
+
+## Project Intent (Read First)
+This repository is a **minimal Proof of Concept (PoC)**.
+Optimize for **clarity, correctness, and architectural learning**, not production completeness.
+
+The goal is to demonstrate:
+- Voice-first UX via Pipecat
+- LLMs for intent interpretation only
+- **Explicit, default-deny decisioning via LangGraph**
+- Real, irreversible side effects guarded by policy
+- Optional LangSmith tracing for debugging
+
+---
+
+## Project Flow (CRITICAL — DO NOT DEVIATE)
+
+1. Incoming voice call (Twilio or Web UI) → POST /
+2. Server returns TwiML with WebSocket URL
+3. WebSocket /ws → Pipecat pipeline
+   (STT → LangGraph → TTS)
+
+4. Step 1 — Case Identification
+   - Agent asks for case number
+   - User provides case number (spoken)
+   - Case number stored in in-memory session state
+
+5. Step 2 — Case Inquiry
+   - User asks: “Why is my case still open?”
+   - LLM extracts intent only (case_status | escalate)
+   - LangGraph evaluates policy and routes execution
+
+6. Allowed outcomes:
+   - Read-only case status
+   - Deny escalation
+   - Allow escalation (strong auth only)
+
+7. Escalation (REAL ACTION):
+   - Active Twilio call is forwarded to a human agent
+   - AI must stop speaking after escalation
+
+8. (Optional) Execution trace sent to LangSmith
+
+⚠️ NO backend action may execute outside LangGraph.
+
+---
+
+## Architecture Rules (NON-NEGOTIABLE)
+
+- Pipecat
+  - Handles audio, turn-taking, STT/TTS only
+  - Must NOT call backend tools directly
+
+- LangGraph
+  - Owns ALL decisions and execution routing
+  - Default-deny: unreachable nodes cannot execute
+
+- LLM
+  - Intent extraction ONLY
+  - Must NOT decide execution paths
+  - Must NOT call tools
+
+- LangSmith
+  - Optional
+  - Debugging and tracing only
+  - Must not affect runtime behavior
+
+---
+
+## Conversation Rules (PoC Scope)
+
+- The agent MUST always ask for a case number first
+- No case number → no backend lookup
+- One case per session
+- One inquiry per session
+- Supported inquiries:
+  - “Why is my case still open?”
+  - “Can you escalate this?”
+
+No free-form conversations.
+
+---
+
+## Key Files (Expected)
+
+- main.py
+  - FastAPI server
+  - Twilio webhook
+  - WebSocket endpoint
+
+- bot.py
+  - Pipecat pipeline
+  - Manages turn order:
+    - ask for case number
+    - wait
+    - forward inquiry to LangGraph
+
+- graph.py
+  - LangGraph state machine
+  - Default-deny routing
+
+- policies.py
+  - In-memory decision table
+
+- tools.py
+  - Backend tools (read-only + escalation)
+
+- prompts.py
+  - Intent-only prompts
+
+---
+
+## LangGraph Rules (CRITICAL)
+
+- Graph MUST be default-deny
+- Tools are unreachable unless explicitly routed
+- Missing policy = deny
+- Case number MUST exist in state before any tool node
+- No business logic inside prompts
+
+Valid decision outputs:
+- allow_status
+- allow_escalate
+- deny
+
+---
+
+## Policy Model (In-Memory, PoC)
+
+| intent       | auth_level | decision        |
+|-------------|------------|-----------------|
+| case_status | any        | allow_status    |
+| escalate    | weak       | deny            |
+| escalate    | strong     | allow_escalate  |
+
+Auth level is simulated (hardcoded per session).
+
+---
+
+## Escalation Rule (REAL SIDE EFFECT)
+
+Escalation is implemented as a REAL Twilio call transfer.
+
+Function:
+    forward_call_to_agent(call_sid, support_phone_number)
+
+Rules:
+- Must ONLY be callable from the LangGraph escalate node
+- Must NOT be imported or called from Pipecat code
+- Requires:
+  - intent == escalate
+  - auth_level == strong
+  - policy decision == allow_escalate
+  - valid call_sid in session state
+  - SUPPORT_PHONE_NUMBER configured
+
+Once escalation happens:
+- AI must stop speaking
+- No further graph execution
+
+---
+
+## Critical Constraints (Intentional)
+
+- In-memory state only
+- No database
+- No retries
+- No async jobs
+- No background workers
+- No user accounts
+- No persistence
+
+Data loss on restart is acceptable.
+
+---
+
+## Observability & Debugging
+
+- LangSmith tracing is OPTIONAL
+- Used only to inspect:
+  - intent extraction
+  - graph routing
+  - final decision
+- Code must run correctly with LangSmith disabled
+
+---
+
+## Environment Variables
+
+TWILIO_ACCOUNT_SID
+TWILIO_AUTH_TOKEN
+DEEPGRAM_API_KEY
+OPENAI_API_KEY
+SUPPORT_PHONE_NUMBER
+LANGSMITH_API_KEY (optional)
+WEBSOCKET_URL (optional)
+
+---
+
+## Explicit Non-Goals (DO NOT ADD)
+
+- RAG or vector databases
+- CRM integrations
+- Multi-agent systems
+- Async workflows
+- User authentication systems
+- Persistent storage
+- UI dashboards
+- Production hardening
+
+If it doesn’t help explain **policy-aware execution**, it doesn’t belong.
+
+---
+
+## Guiding Principle
+
+LLMs interpret.
+Graphs decide.
+Voice delivers.
