@@ -41,7 +41,7 @@ flowchart TB
         STT[STT Service<br/>Deepgram]
         CTX[Context Aggregator]
         LLM[Bot LLM<br/>OpenAI GPT-4o-mini]
-        TTS[TTS Service<br/>Cartesia]
+        TTS[TTS Service<br/>OpenAI Primary<br/>Cartesia Backup]
         OUT[WebSocket Output]
         
         IN --> STT
@@ -80,7 +80,7 @@ flowchart TB
     
     subgraph "Tools & Actions"
         GET_STATUS[get_case_status<br/>Read-only tool]
-        FORWARD[forward_call_to_agent<br/>Twilio API]
+        FORWARD[forward_call_to_agent<br/>Twilio TwiML Update]
     end
     
     subgraph "Response Flow"
@@ -104,7 +104,7 @@ flowchart TB
     
     STATUS --> GET_STATUS
     ESCALATE --> FORWARD
-    FORWARD -->|Call Transfer| TW
+    FORWARD -->|TwiML Update| TW
     
     style START fill:#e1f5ff
     style INTENT fill:#fff4e1

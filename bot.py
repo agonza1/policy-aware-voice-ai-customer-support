@@ -204,8 +204,8 @@ async def main(websocket_client, stream_sid: str, call_sid: Optional[str] = None
         logger.info("LangGraph monitoring task started")
         while True:
             try:
-                # Check more frequently to catch escalation requests quickly
-                await asyncio.sleep(0.5)
+                # Check periodically for new messages
+                await asyncio.sleep(2)
                 
                 # If escalation has occurred, skip processing but keep loop running to maintain connection
                 if conversation_state.get("escalated"):
