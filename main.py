@@ -116,14 +116,21 @@ async def transfer_call(request: Request):
   <Hangup/>
 </Response>'''
         else:
-            logger.info(f"Transferring call to {support_phone_number}")
+            # Normalize and escape the phone number for TwiML
+            from tools import normalize_phone_number
+            normalized_number = normalize_phone_number(support_phone_number)
+            logger.info(f"Transferring call to {normalized_number} (normalized from {support_phone_number})")
+            
             # Use Dial with proper attributes for call transfer
+            # If Dial fails (no answer, busy, etc.), Twilio will continue to next verb
             xml_content = f'''<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say>Connecting you to one of our agents now. Please hold.</Say>
-  <Dial timeout="30" answerOnMedia="false">
-    <Number>{support_phone_number}</Number>
+  <Say voice="alice">Connecting you to one of our agents now. Please hold.</Say>
+  <Dial timeout="30" answerOnMedia="false" hangupOnStar="false" record="false">
+    <Number>{normalized_number}</Number>
   </Dial>
+  <Say voice="alice">I'm sorry, we couldn't connect you to an agent at this time. Please try again later.</Say>
+  <Hangup/>
 </Response>'''
         
         logger.debug(f"Returning TwiML for transfer to {support_phone_number}")

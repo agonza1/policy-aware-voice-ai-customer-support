@@ -7,7 +7,6 @@ These tools are ONLY accessible through explicit LangGraph routing.
 import os
 import re
 from typing import Optional
-from urllib.parse import quote_plus
 
 from loguru import logger
 from twilio.rest import Client
@@ -188,14 +187,11 @@ def forward_call_to_agent(call_sid: str, support_phone_number: str) -> bool:
             logger.error(f"Could not fetch call {call_sid} before transfer: {e}")
             return False
         
-        # Use inline TwiML directly (more reliable for active call updates)
-        # URL-based approach may not work reliably when updating active calls connected to WebSocket
+        # Use inline TwiML directly (simple approach like the example)
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say>Connecting you to one of our agents now. Please hold.</Say>
-    <Dial timeout="30" answerOnMedia="false">
-        <Number>{normalized_number}</Number>
-    </Dial>
+    <Dial>{normalized_number}</Dial>
 </Response>"""
         
         logger.info(f"Updating call {call_sid} with inline transfer TwiML to {normalized_number}")
