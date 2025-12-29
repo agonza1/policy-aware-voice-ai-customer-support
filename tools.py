@@ -149,18 +149,7 @@ def get_case_status(case_number: str) -> dict:
 
 
 def forward_call_to_agent(call_sid: str, support_phone_number: str) -> bool:
-    """Forward a Twilio call to a human agent using TwiML Dial verb.
-    
-    This is a REAL side effect that transfers the call.
-    This function MUST only be called from LangGraph escalation node.
-    
-    Args:
-        call_sid: The Twilio Call SID to forward
-        support_phone_number: The phone number to forward to
-        
-    Returns:
-        bool: True if forwarding was successful, False otherwise
-    """
+    """Forward a Twilio call to a human agent using TwiML Dial verb"""
     if not call_sid:
         logger.error("Cannot forward call: call_sid is missing")
         return False
@@ -169,67 +158,18 @@ def forward_call_to_agent(call_sid: str, support_phone_number: str) -> bool:
         logger.error("Cannot forward call: SUPPORT_PHONE_NUMBER is not configured")
         return False
     
-    # Normalize phone number to E.164 format (required by Twilio)
-    normalized_number = normalize_phone_number(support_phone_number)
-    if normalized_number != support_phone_number:
-        logger.info(f"Normalized phone number from {support_phone_number} to {normalized_number}")
-    
     try:
         client = get_twilio_client()
-        
-        # First, verify the call exists and get its current status
-        try:
-            current_call = client.calls(call_sid).fetch()
-            logger.info(f"Current call status before transfer: {current_call.status}")
-            if current_call.status not in ['in-progress', 'ringing', 'queued']:
-                logger.warning(f"Call {call_sid} is in status '{current_call.status}' - may not be able to transfer")
-        except Exception as e:
-            logger.error(f"Could not fetch call {call_sid} before transfer: {e}")
-            return False
-        
-        # Use inline TwiML directly (simple approach like the example)
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say>Connecting you to one of our agents now. Please hold.</Say>
-    <Dial>{normalized_number}</Dial>
+    <Dial>{support_phone_number}</Dial>
 </Response>"""
         
-        logger.info(f"Updating call {call_sid} with inline transfer TwiML to {normalized_number}")
-        logger.debug(f"TwiML being sent: {twiml}")
-        
-        # Update the call with inline TwiML - this redirects the call away from WebSocket
         call = client.calls(call_sid).update(twiml=twiml)
-        
-        # Verify the update was successful by checking call status
-        # After update, the call should be in-progress or ringing
-        call_status = call.status
-        logger.info(f"Call {call_sid} update successful. Status: {call_status}. Forwarded to {normalized_number}")
-        logger.info(f"Call will be redirected - WebSocket connection closing is expected behavior")
-        
-        # Verify the phone number format one more time
-        if not normalized_number.startswith('+'):
-            logger.error(f"Phone number {normalized_number} does not start with + - this may cause dialing issues")
-            return False
-        
-        if len(normalized_number) < 10:
-            logger.error(f"Phone number {normalized_number} seems too short - this may cause dialing issues")
-            return False
-        
-        # Log additional call details for debugging (safely, non-fatal)
-        # Only log safe attributes that we know exist
-        try:
-            call_to = getattr(call, 'to', 'N/A')
-            call_direction = getattr(call, 'direction', 'N/A')
-            logger.debug(f"Call details after update - To: {call_to}, Direction: {call_direction}")
-        except Exception as e:
-            # Non-fatal - just log and continue, don't let this affect the return value
-            logger.debug(f"Could not log call details (non-fatal): {e}")
-        
-        # Return True - the call update was successful
-        # The debug logging above is non-fatal and won't affect this return
+        logger.info(f"Call {call_sid} forwarded to {support_phone_number}")
         return True
-        
     except Exception as e:
-        logger.error(f"Error forwarding call {call_sid} to {support_phone_number}: {e}", exc_info=True)
+        logger.error(f"Error forwarding call {call_sid} to {support_phone_number}: {e}")
         return False
 
