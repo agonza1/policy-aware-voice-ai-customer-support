@@ -5,10 +5,71 @@ These tools are ONLY accessible through explicit LangGraph routing.
 """
 
 import os
+import re
 from typing import Optional
+from urllib.parse import quote_plus
 
 from loguru import logger
 from twilio.rest import Client
+
+
+def get_base_url() -> str:
+    """Get the base URL for TwiML endpoints.
+    
+    Uses BASE_URL environment variable if set, otherwise defaults to localhost.
+    In production, this should be set to your public URL.
+    """
+    base_url = os.getenv("BASE_URL")
+    if base_url:
+        return base_url.rstrip("/")
+    # Default to localhost for development
+    return "http://localhost:8000"
+
+
+def normalize_phone_number(phone_number: str) -> str:
+    """Normalize phone number to E.164 format required by Twilio.
+    
+    Args:
+        phone_number: Phone number in various formats (e.g., "8042221111", "+18042221111", "1-804-222-1111")
+        
+    Returns:
+        Phone number in E.164 format (e.g., "+18042221111")
+    """
+    if not phone_number:
+        return phone_number
+    
+    # Remove all non-digit characters except +
+    cleaned = re.sub(r'[^\d+]', '', phone_number)
+    
+    # If it already starts with +, assume it's already in E.164 format
+    if cleaned.startswith('+'):
+        return cleaned
+    
+    # If it's 10 digits (US number without country code), add +1
+    if len(cleaned) == 10:
+        return f"+1{cleaned}"
+    
+    # If it's 11 digits starting with 1, add +
+    if len(cleaned) == 11 and cleaned.startswith('1'):
+        return f"+{cleaned}"
+    
+    # If it's already 11 digits with +1, return as-is (shouldn't happen after cleaning)
+    # Otherwise, log warning and return with + prefix
+    if len(cleaned) > 11:
+        logger.warning(f"Phone number {phone_number} has unusual length after cleaning: {cleaned}")
+    
+    # Try to add +1 if it looks like a US number
+    if cleaned.isdigit() and len(cleaned) >= 10:
+        # Take last 10 digits and add +1
+        last_10 = cleaned[-10:]
+        return f"+1{last_10}"
+    
+    # Fallback: return with + prefix if it doesn't have one
+    if not cleaned.startswith('+'):
+        logger.warning(f"Could not normalize phone number {phone_number}, using as-is: {cleaned}")
+        return f"+{cleaned}" if cleaned else phone_number
+    
+    return cleaned
 
 # Initialize Twilio client
 _twilio_client: Optional[Client] = None
@@ -59,70 +120,120 @@ def get_case_status(case_number: str) -> dict:
         }
     }
     
-    # Return mock data or default
-    status = mock_statuses.get(
-        case_number,
-        {
+    # Normalize case number for lookup (handle both VIP-001 and VIP001 formats)
+    # Try exact match first
+    status = mock_statuses.get(case_number)
+    
+    if not status:
+        # Try normalized version (VIP001 -> VIP-001)
+        normalized_case = case_number
+        if case_number.upper().startswith("VIP") and "-" not in case_number:
+            # Convert VIP001 to VIP-001 for lookup
+            vip_match = re.match(r'(VIP)(\d+)', case_number.upper())
+            if vip_match:
+                normalized_case = f"{vip_match.group(1)}-{vip_match.group(2)}"
+        
+        status = mock_statuses.get(normalized_case)
+    
+    # If still not found, return default
+    if not status:
+        status = {
             "case_number": case_number,
             "status": "unknown",
             "reason": "Case not found in system",
             "opened_date": "unknown",
             "last_updated": "unknown"
         }
-    )
     
     logger.info(f"Case status retrieved: {status}")
     return status
 
 
 def forward_call_to_agent(call_sid: str, support_phone_number: str) -> bool:
-    """Forward an active Twilio call to a human agent.
+    """Forward a Twilio call to a human agent using TwiML Dial verb.
     
     This is a REAL side effect that transfers the call.
     This function MUST only be called from LangGraph escalation node.
     
     Args:
         call_sid: The Twilio Call SID to forward
-        support_phone_number: The phone number to forward to (not used directly, but validated)
+        support_phone_number: The phone number to forward to
         
     Returns:
         bool: True if forwarding was successful, False otherwise
     """
-    logger.info(f"Forwarding call {call_sid} to agent at {support_phone_number}")
+    if not call_sid:
+        logger.error("Cannot forward call: call_sid is missing")
+        return False
+    
+    if not support_phone_number:
+        logger.error("Cannot forward call: SUPPORT_PHONE_NUMBER is not configured")
+        return False
+    
+    # Normalize phone number to E.164 format (required by Twilio)
+    normalized_number = normalize_phone_number(support_phone_number)
+    if normalized_number != support_phone_number:
+        logger.info(f"Normalized phone number from {support_phone_number} to {normalized_number}")
     
     try:
         client = get_twilio_client()
-        call = client.calls(call_sid)
         
-        # Get the base URL for the transfer endpoint
-        # Prefer BASE_URL environment variable, otherwise derive from WEBSOCKET_URL
-        base_url = os.getenv("BASE_URL")
-        if not base_url:
-            websocket_url = os.getenv("WEBSOCKET_URL", "")
-            if websocket_url:
-                # Remove /ws suffix if present and convert wss:// to https://
-                base_url = websocket_url.replace("/ws", "").rstrip("/")
-                # Convert WebSocket scheme to HTTP scheme
-                if base_url.startswith("wss://"):
-                    base_url = base_url.replace("wss://", "https://", 1)
-                elif base_url.startswith("ws://"):
-                    base_url = base_url.replace("ws://", "http://", 1)
-            else:
-                # Last resort: This should ideally be set via BASE_URL environment variable
-                logger.error("BASE_URL and WEBSOCKET_URL not set - transfer will fail")
-                raise ValueError("BASE_URL or WEBSOCKET_URL must be set for call transfer")
+        # First, verify the call exists and get its current status
+        try:
+            current_call = client.calls(call_sid).fetch()
+            logger.info(f"Current call status before transfer: {current_call.status}")
+            if current_call.status not in ['in-progress', 'ringing', 'queued']:
+                logger.warning(f"Call {call_sid} is in status '{current_call.status}' - may not be able to transfer")
+        except Exception as e:
+            logger.error(f"Could not fetch call {call_sid} before transfer: {e}")
+            return False
         
-        transfer_url = f"{base_url}/transfer"
-        logger.info(f"Using transfer URL: {transfer_url}")
+        # Use inline TwiML directly (more reliable for active call updates)
+        # URL-based approach may not work reliably when updating active calls connected to WebSocket
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say>Connecting you to one of our agents now. Please hold.</Say>
+    <Dial timeout="30" answerOnMedia="false">
+        <Number>{normalized_number}</Number>
+    </Dial>
+</Response>"""
         
-        # Use URL parameter instead of inline TwiML for more reliable call transfers
-        # This is the recommended approach for active calls
-        call.update(url=transfer_url, method="POST")
+        logger.info(f"Updating call {call_sid} with inline transfer TwiML to {normalized_number}")
+        logger.debug(f"TwiML being sent: {twiml}")
         
-        logger.info(f"Successfully initiated transfer for call {call_sid} to {support_phone_number}")
+        # Update the call with inline TwiML - this redirects the call away from WebSocket
+        call = client.calls(call_sid).update(twiml=twiml)
+        
+        # Verify the update was successful by checking call status
+        # After update, the call should be in-progress or ringing
+        call_status = call.status
+        logger.info(f"Call {call_sid} update successful. Status: {call_status}. Forwarded to {normalized_number}")
+        logger.info(f"Call will be redirected - WebSocket connection closing is expected behavior")
+        
+        # Verify the phone number format one more time
+        if not normalized_number.startswith('+'):
+            logger.error(f"Phone number {normalized_number} does not start with + - this may cause dialing issues")
+            return False
+        
+        if len(normalized_number) < 10:
+            logger.error(f"Phone number {normalized_number} seems too short - this may cause dialing issues")
+            return False
+        
+        # Log additional call details for debugging (safely, non-fatal)
+        # Only log safe attributes that we know exist
+        try:
+            call_to = getattr(call, 'to', 'N/A')
+            call_direction = getattr(call, 'direction', 'N/A')
+            logger.debug(f"Call details after update - To: {call_to}, Direction: {call_direction}")
+        except Exception as e:
+            # Non-fatal - just log and continue, don't let this affect the return value
+            logger.debug(f"Could not log call details (non-fatal): {e}")
+        
+        # Return True - the call update was successful
+        # The debug logging above is non-fatal and won't affect this return
         return True
         
     except Exception as e:
-        logger.error(f"Failed to forward call {call_sid}: {str(e)}", exc_info=True)
+        logger.error(f"Error forwarding call {call_sid} to {support_phone_number}: {e}", exc_info=True)
         return False
 

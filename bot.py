@@ -22,6 +22,7 @@ from pipecat.serializers.twilio import TwilioFrameSerializer
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService, LiveOptions
 from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.services.openai.tts import OpenAITTSService
 from pipecat.transports.network.fastapi_websocket import (
     FastAPIWebsocketTransport,
     FastAPIWebsocketParams,
@@ -40,6 +41,7 @@ logger.add(sys.stderr, level="DEBUG")
 DEFAULT_COMPANY_NAME = os.getenv("COMPANY_NAME", "our company")
 CARTESIA_MODEL = os.getenv("CARTESIA_MODEL", "sonic-3")
 CARTESIA_VOICE_ID = os.getenv("CARTESIA_WELCOME_VOICE_ID", "sonic-3")
+OPENAI_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "alloy")  # Options: alloy, echo, fable, onyx, nova, shimmer
 
 
 def build_system_prompt(company_name: str) -> str:
@@ -49,7 +51,7 @@ You are a helpful customer support agent for {company_name}. Your role is to ass
 
 1. **Case Status Inquiries**: Help customers check the status of their support cases. You will need their case number to look up the status.
 
-2. **Case Escalation**: If a customer requests escalation or if their case meets certain criteria, you can escalate their call to a human agent.
+2. **Case Escalation**: CRITICAL - If a customer requests escalation, transfer, or to speak with a human agent (using words like "escalate", "agent", "human", "representative", "transfer", "connect me", "speak with"), DO NOT generate ANY response. Be completely silent. Do not say "One moment please" or "I understand" or anything at all. The system handles escalation automatically - you must say nothing.
 
 Keep your responses:
 - Concise and professional (2-3 sentences max)
@@ -57,7 +59,8 @@ Keep your responses:
 - Focused on solving the customer's issue
 
 When a customer provides their case number, acknowledge it and let them know you're checking the status.
-If they want to escalate, confirm and let them know you're connecting them to an agent.
+
+IMPORTANT: For escalation requests, be silent or very brief - the system handles it automatically.
 
 Respond in the same language the caller uses.
 """.strip()
@@ -106,28 +109,46 @@ async def main(websocket_client, stream_sid: str, call_sid: Optional[str] = None
         model="gpt-4o-mini",
     )
     
-    # TTS Service (Cartesia)
-    cartesia_api_key = os.getenv("CARTESIA_API_KEY")
-    cartesia_voice_id = CARTESIA_VOICE_ID
-    
+    # TTS Service - OpenAI as primary, Cartesia as backup
+    openai_tts: OpenAITTSService | None = None
     cartesia_tts: CartesiaTTSService | None = None
-    if cartesia_api_key and cartesia_voice_id:
-        try:
-            cartesia_tts = CartesiaTTSService(
-                api_key=cartesia_api_key,
-                voice_id=cartesia_voice_id,
-                model=CARTESIA_MODEL,
-            )
-            logger.info("Cartesia TTS enabled.")
-        except Exception as exc:
-            logger.error(f"Failed to initialize Cartesia TTS: {exc}")
-            cartesia_tts = None
-    else:
-        logger.warning("Cartesia TTS not configured; CARTESIA_API_KEY and CARTESIA_WELCOME_VOICE_ID required.")
     
-    if not cartesia_tts:
+    # Try OpenAI TTS first (primary)
+    try:
+        openai_tts = OpenAITTSService(
+            api_key=openai_api_key,
+            voice=OPENAI_TTS_VOICE,
+        )
+        logger.info(f"OpenAI TTS enabled as primary (voice: {OPENAI_TTS_VOICE}).")
+    except Exception as exc:
+        logger.warning(f"Failed to initialize OpenAI TTS: {exc}, will try Cartesia as backup")
+        openai_tts = None
+    
+    # Try Cartesia TTS as backup if OpenAI failed
+    if not openai_tts:
+        cartesia_api_key = os.getenv("CARTESIA_API_KEY")
+        cartesia_voice_id = CARTESIA_VOICE_ID
+        
+        if cartesia_api_key and cartesia_voice_id:
+            try:
+                cartesia_tts = CartesiaTTSService(
+                    api_key=cartesia_api_key,
+                    voice_id=cartesia_voice_id,
+                    model=CARTESIA_MODEL,
+                )
+                logger.info("Cartesia TTS enabled as backup.")
+            except Exception as exc:
+                logger.error(f"Failed to initialize Cartesia TTS: {exc}")
+                cartesia_tts = None
+        else:
+            logger.warning("Cartesia TTS not configured; CARTESIA_API_KEY and CARTESIA_WELCOME_VOICE_ID required.")
+    
+    # Use whichever TTS service is available
+    tts_service = openai_tts or cartesia_tts
+    if not tts_service:
         raise RuntimeError(
-            "Cartesia TTS is not configured correctly. Set CARTESIA_API_KEY and CARTESIA_WELCOME_VOICE_ID."
+            "No TTS service available. Configure OPENAI_API_KEY (for OpenAI TTS) or "
+            "CARTESIA_API_KEY and CARTESIA_WELCOME_VOICE_ID (for Cartesia TTS)."
         )
 
     # Initialize conversation context
@@ -150,6 +171,7 @@ async def main(websocket_client, stream_sid: str, call_sid: Optional[str] = None
         "escalated": False,
         "case_number_extracted_after_inquiry": False,  # Track if we already re-ran LangGraph after extracting case number
         "escalation_processed": False,  # Track if we've already processed an escalation request
+        "last_processed_message": None,  # Track the last message we processed to avoid duplicates
     }
     
     # Create pipeline
@@ -159,7 +181,7 @@ async def main(websocket_client, stream_sid: str, call_sid: Optional[str] = None
             stt,  # Speech-To-Text
             context_aggregator.user(),
             llm,  # LLM
-            cartesia_tts,  # Text-To-Speech (Cartesia)
+            tts_service,  # Text-To-Speech (OpenAI primary, Cartesia backup)
             transport.output(),  # Websocket output to Twilio
             context_aggregator.assistant(),
         ]
@@ -182,7 +204,14 @@ async def main(websocket_client, stream_sid: str, call_sid: Optional[str] = None
         logger.info("LangGraph monitoring task started")
         while True:
             try:
-                await asyncio.sleep(2)
+                # Check more frequently to catch escalation requests quickly
+                await asyncio.sleep(0.5)
+                
+                # If escalation has occurred, skip processing but keep loop running to maintain connection
+                if conversation_state.get("escalated"):
+                    logger.debug("Escalation completed - skipping message processing but keeping connection open")
+                    continue
+                
                 aggregated_messages = context.get_messages()
                 if not aggregated_messages:
                     continue
@@ -193,6 +222,14 @@ async def main(websocket_client, stream_sid: str, call_sid: Optional[str] = None
                     continue
                 
                 latest_user_text = user_messages[-1]
+                logger.debug(f"Monitoring latest user message: {latest_user_text}")
+                
+                # Skip if we've already processed this exact message
+                if latest_user_text == conversation_state.get("last_processed_message"):
+                    logger.debug(f"Skipping already processed message: {latest_user_text}")
+                    continue
+                
+                conversation_state["last_processed_message"] = latest_user_text
                 
                 # Extract case number if not already collected
                 if not conversation_state["case_number_collected"]:
@@ -200,6 +237,7 @@ async def main(websocket_client, stream_sid: str, call_sid: Optional[str] = None
                     if case_number:
                         conversation_state["case_number"] = case_number
                         conversation_state["case_number_collected"] = True
+                        logger.info(f"Extracted case number: {case_number}")
                 
                 # If we just extracted a case number and inquiry was already processed (without case number),
                 # reset inquiry_processed to re-run LangGraph with the case number (only once)
@@ -212,73 +250,88 @@ async def main(websocket_client, stream_sid: str, call_sid: Optional[str] = None
                     conversation_state["inquiry_processed"] = False
                     conversation_state["case_number_extracted_after_inquiry"] = True
                 
-                # Route to LangGraph for policy decisions if inquiry not yet processed
-                if not conversation_state["inquiry_processed"]:
+                # Route to LangGraph for policy decisions
+                # LangGraph handles all decision-making including escalation detection
+                # Always process if inquiry not yet processed, OR if escalation is requested (even after previous inquiry)
+                should_process = not conversation_state["inquiry_processed"]
+                logger.debug(f"Should process inquiry: {should_process}, inquiry_processed: {conversation_state.get('inquiry_processed')}, escalated: {conversation_state.get('escalated')}")
+                
+                # Also check if this might be an escalation request (even if inquiry was already processed)
+                if not should_process and not conversation_state.get("escalated"):
+                    # Quick check for escalation keywords to allow re-processing for escalation
+                    escalation_keywords = [
+                        "escalate", "agent", "human", "representative", "speak to someone",
+                        "talk to a person", "transfer", "manager", "supervisor", "connect me", "connect"
+                    ]
+                    has_escalation_keyword = any(keyword in latest_user_text.lower() for keyword in escalation_keywords)
+                    logger.debug(f"Checking for escalation keywords in '{latest_user_text}': {has_escalation_keyword}")
+                    if has_escalation_keyword:
+                        logger.info(f"Escalation request detected in message: '{latest_user_text}' - routing to LangGraph even though inquiry was already processed")
+                        should_process = True
+                
+                if should_process:
+                    logger.info(f"Processing message through LangGraph: '{latest_user_text}'")
                     try:
-                        # Run LangGraph with the user's inquiry (not async, so no await)
+                        # Run LangGraph with the user's inquiry - it will extract intent and make decisions
                         result = run_graph(
                             user_input=latest_user_text,
                             case_number=conversation_state.get("case_number"),
                             call_sid=call_sid,
                         )
+                        logger.info(f"LangGraph result: escalated={result.get('escalated')}, intent={result.get('intent')}, response_text={result.get('response_text')}")
                         
-                        conversation_state["inquiry_processed"] = True
+                        # Only mark as processed if this wasn't an escalation request after a previous inquiry
+                        intent = result.get("intent")
+                        if intent != "escalate" or not conversation_state["inquiry_processed"]:
+                            conversation_state["inquiry_processed"] = True
+                        
                         escalated = result.get("escalated", False)
                         conversation_state["escalated"] = escalated
                         
-                        # If escalation succeeded, stop the bot immediately
+                        # Handle escalation if LangGraph decided to escalate
                         if escalated:
-                            logger.info("Escalation successful - stopping bot pipeline")
-                            # Send EndFrame to stop the pipeline and allow transfer to proceed
-                            await task.queue_frames([EndFrame()])
-                            # Break out of monitoring loop since call is being transferred
-                            break
+                            logger.info("LangGraph decided to escalate - handling transfer")
+                            
+                            # CRITICAL: Stop the LLM from generating responses
+                            # The transfer TwiML will handle the announcement, so we don't need to speak anything
+                            stop_message = {
+                                "role": "system",
+                                "content": "CRITICAL: The call has been escalated to a human agent. You MUST NOT generate any responses. The conversation is ending immediately. Do not speak. Do not respond. Stop all processing. Be completely silent."
+                            }
+                            messages.append(stop_message)
+                            
+                            # Update the main system prompt to prevent future responses
+                            for msg in messages:
+                                if msg.get("role") == "system" and "customer support agent" in msg.get("content", ""):
+                                    msg["content"] = f"{msg['content']}\n\nCRITICAL: The call has been escalated. Do not generate any responses. Be completely silent."
+                                    break
+                            sync_context()
+                            
+                            # DO NOT try to speak the LangGraph response - the transfer TwiML already has a <Say> verb
+                            # that will announce the transfer. Speaking here causes issues because the WebSocket
+                            # closes when Twilio processes the transfer TwiML.
+                            logger.info("Transfer initiated via TwiML - TwiML will handle the announcement")
+                            
+                            # Don't break out of the loop - keep it running so WebSocket stays open briefly
+                            # The transfer will happen via TwiML, which will close the connection
+                            # We'll just skip processing new messages since escalated is now True
+                            # Continue the loop but it will skip processing due to escalated=True check at top
+                            continue
                         
-                        # If LangGraph generated a response, inject it into the conversation
+                        # If LangGraph generated a response (non-escalation), inject it into the conversation
                         response_text = result.get("response_text")
                         if response_text:
                             logger.info(f"LangGraph response: {response_text}")
                             # Queue the response directly as a TextFrame to trigger TTS
-                            # This ensures the response is spoken immediately
                             await task.queue_frames([TextFrame(text=response_text)])
                             
                     except Exception as e:
                         logger.error(f"Error in LangGraph processing: {e}", exc_info=True)
                 
-                # Check for escalation requests (only if not already processed)
-                if not conversation_state["escalated"] and not conversation_state["escalation_processed"]:
-                    escalation_keywords = [
-                        "escalate", "agent", "human", "representative", "speak to someone",
-                        "talk to a person", "transfer", "manager", "supervisor"
-                    ]
-                    if any(keyword in latest_user_text.lower() for keyword in escalation_keywords):
-                        logger.info("Escalation requested by user")
-                        # Mark as processed to prevent loops
-                        conversation_state["escalation_processed"] = True
-                        # Route to LangGraph for escalation decision
-                        try:
-                            result = run_graph(
-                                user_input="I want to escalate my case to a human agent",
-                                case_number=conversation_state.get("case_number"),
-                                call_sid=call_sid,
-                            )
-                            escalated = result.get("escalated", False)
-                            conversation_state["escalated"] = escalated
-                            if escalated:
-                                logger.info("Call escalated via LangGraph - stopping bot pipeline")
-                                # Send EndFrame to stop the pipeline and allow transfer to proceed
-                                await task.queue_frames([EndFrame()])
-                                # Break out of monitoring loop since call is being transferred
-                                break
-                            else:
-                                # Escalation was denied - speak the denial message
-                                response_text = result.get("response_text")
-                                if response_text:
-                                    logger.info(f"Escalation denied - speaking response: {response_text}")
-                                    await task.queue_frames([TextFrame(text=response_text)])
-                        except Exception as e:
-                            logger.error(f"Error in escalation: {e}", exc_info=True)
-                
+            except asyncio.CancelledError:
+                # Task was cancelled (e.g., when WebSocket closes during transfer)
+                logger.info("Monitoring task cancelled - connection closing")
+                break
             except Exception as e:
                 logger.error(f"Error in monitor_messages: {e}", exc_info=True)
                 await asyncio.sleep(2)
