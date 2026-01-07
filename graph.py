@@ -17,6 +17,18 @@ from policies import Decision, evaluate_policy, get_auth_level
 from prompts import INTENT_EXTRACTION_PROMPT
 from tools import forward_call_to_agent, get_case_status
 
+# Configure Langfuse tracing if environment variables are set
+# Langfuse works with LangChain's tracing via LANGCHAIN_API_KEY and LANGCHAIN_ENDPOINT
+if os.getenv("LANGCHAIN_API_KEY") or os.getenv("LANGFUSE_SECRET_KEY"):
+    os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+    # Default to local Langfuse if endpoint not set
+    if not os.getenv("LANGCHAIN_ENDPOINT"):
+        langfuse_host = os.getenv("LANGFUSE_HOST", "localhost:3000")
+        os.environ.setdefault("LANGCHAIN_ENDPOINT", f"http://{langfuse_host}/public")
+    # Set project name
+    project = os.getenv("LANGCHAIN_PROJECT") or os.getenv("LANGFUSE_PROJECT", "policy-aware-voice-ai")
+    os.environ.setdefault("LANGCHAIN_PROJECT", project)
+
 
 class GraphState(TypedDict):
     """State for the LangGraph state machine."""
@@ -37,6 +49,7 @@ class GraphState(TypedDict):
     escalated: bool
 
 
+@traceable(name="extract_intent")
 def extract_intent(state: GraphState) -> GraphState:
     """Extract intent from user input using LLM.
     
@@ -78,6 +91,7 @@ def extract_intent(state: GraphState) -> GraphState:
         return {**state, "intent": None}
 
 
+@traceable(name="evaluate_policy")
 def evaluate_policy_node(state: GraphState) -> GraphState:
     """Evaluate policy and determine decision."""
     intent = state.get("intent")
@@ -114,6 +128,7 @@ def route_decision(state: GraphState) -> Literal["status_node", "escalate_node",
         return "deny_node"
 
 
+@traceable(name="status_node")
 def status_node(state: GraphState) -> GraphState:
     """Handle case status lookup (read-only)."""
     case_number = state.get("case_number")
@@ -143,6 +158,7 @@ def status_node(state: GraphState) -> GraphState:
         }
 
 
+@traceable(name="escalate_node")
 def escalate_node(state: GraphState) -> GraphState:
     """Handle call escalation (REAL SIDE EFFECT)."""
     call_sid = state.get("call_sid")

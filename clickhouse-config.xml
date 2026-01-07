@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<clickhouse>
+    <!-- Single-node cluster configuration (cluster points to itself) -->
+    <remote_servers>
+        <default>
+            <shard>
+                <replica>
+                    <host>localhost</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </default>
+    </remote_servers>
+    
+    <!-- ZooKeeper configuration for ReplicatedMergeTree -->
+    <zookeeper>
+        <node>
+            <host>zookeeper</host>
+            <port>2181</port>
+        </node>
+    </zookeeper>
+    
+    <!-- Macros for cluster configuration (required for ReplicatedMergeTree) -->
+    <macros>
+        <shard>1</shard>
+        <replica>1</replica>
+    </macros>
+</clickhouse>
+

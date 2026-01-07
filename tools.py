@@ -8,6 +8,7 @@ import os
 import re
 from typing import Optional
 
+from langsmith import traceable
 from loguru import logger
 from twilio.rest import Client
 
@@ -86,6 +87,7 @@ def get_twilio_client() -> Client:
     return _twilio_client
 
 
+@traceable(name="get_case_status")
 def get_case_status(case_number: str) -> dict:
     """Get case status (read-only operation).
     
@@ -148,6 +150,7 @@ def get_case_status(case_number: str) -> dict:
     return status
 
 
+@traceable(name="forward_call_to_agent")
 def forward_call_to_agent(call_sid: str, support_phone_number: str) -> bool:
     """Forward a Twilio call to a human agent using TwiML Dial verb"""
     if not call_sid:

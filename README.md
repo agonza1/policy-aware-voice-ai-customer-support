@@ -200,6 +200,12 @@ docker run -p 8000:8000 --env-file .env policy-aware-voice-ai
    WEBSOCKET_URL=wss://your-domain.com/ws  # Auto-detected if not set
    SUPPORT_PHONE_NUMBER=+1234567890
    COMPANY_NAME=YourCompany
+   
+   # Langfuse Tracing (Optional - see Tracing & Monitoring section)
+   LANGCHAIN_TRACING_V2=true
+   LANGCHAIN_ENDPOINT=http://localhost:3000/public
+   LANGCHAIN_API_KEY=your-langfuse-api-key
+   LANGCHAIN_PROJECT=policy-aware-voice-ai
    ```
 
 ## Running the Application
@@ -244,7 +250,7 @@ Ensure:
 - **OpenAI** - Bot LLM (conversation) and LangGraph LLM (intent extraction)
 - **Cartesia** - Alternative Text-to-Speech provider
 - **LangGraph** - Explicit decision & execution plane for policy enforcement
-- **LangSmith** (optional) - Tracing and debugging
+- **Langfuse** (optional) - Self-hosted tracing and monitoring
 
 ## Project Structure
 
@@ -276,6 +282,29 @@ For detailed documentation, see the [`docs/`](./docs/) directory:
    - Read-only case status (spoken)
    - Escalation denied (spoken explanation)
    - Escalation allowed → call forwarded to human agent
+
+## Tracing & Monitoring (Langfuse - Self-Hosted)
+
+Open-source, self-hosted tracing and monitoring.
+
+**Quick start**:
+```bash
+# 1. Start Langfuse
+docker compose -f docker-compose.langfuse.yml up -d
+
+# 2. Access UI at http://localhost:3000
+#    Default credentials: admin@langchain.dev / admin
+
+# 3. Get API key: Settings → API Keys in the UI
+
+# 4. Add to .env:
+#    LANGCHAIN_TRACING_V2=true
+#    LANGCHAIN_ENDPOINT=http://localhost:3000/public
+#    LANGCHAIN_API_KEY=<from-ui>
+#    LANGCHAIN_PROJECT=policy-aware-voice-ai
+```
+
+Traces include: LangGraph execution flow, LLM calls (intent extraction), policy decisions, tool executions, and latency metrics. All functions are automatically traced with `@traceable` decorators.
 
 ## Limitations (Intentional for PoC)
 
