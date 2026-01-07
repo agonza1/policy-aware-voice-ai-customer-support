@@ -304,6 +304,8 @@ docker compose -f docker-compose.langfuse.yml up -d
 #    LANGCHAIN_PROJECT=policy-aware-voice-ai
 ```
 
+**Note**: Uses Langfuse version 2.40.0 (stable version without ZodError issues). All services (PostgreSQL, ClickHouse, ZooKeeper) are configured and ready.
+
 Traces include: LangGraph execution flow, LLM calls (intent extraction), policy decisions, tool executions, and latency metrics. All functions are automatically traced with `@traceable` decorators.
 
 ## Limitations (Intentional for PoC)

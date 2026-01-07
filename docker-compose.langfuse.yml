@@ -62,7 +62,7 @@ services:
         hard: 262144
 
   langfuse:
-    image: langfuse/langfuse:2.50.0
+    image: langfuse/langfuse:2.40.0
     container_name: langfuse
     depends_on:
       langfuse-db:
