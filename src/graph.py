@@ -6,6 +6,7 @@ It enforces default-deny execution - tools are unreachable unless explicitly rou
 
 import json
 import os
+import re
 from typing import Annotated, Literal, Optional, TypedDict
 
 from langchain_openai import ChatOpenAI
@@ -18,65 +19,107 @@ from src.policies import Decision, evaluate_policy, get_auth_level
 from src.prompts import INTENT_EXTRACTION_PROMPT
 from src.tools import forward_call_to_agent, get_case_status
 
+# Node name constants
+NODE_EXTRACT_INTENT = "extract_intent"
+NODE_EVALUATE_POLICY = "evaluate_policy"
+NODE_STATUS = "status_node"
+NODE_ESCALATE = "escalate_node"
+NODE_DENY = "deny_node"
+
+# Valid intent values
+VALID_INTENTS = {"case_status", "escalate"}
+
 # Configure Langfuse tracing if environment variables are set
 # Use Langfuse's callback handler for proper LangChain integration
 # IMPORTANT: Disable LANGCHAIN_TRACING_V2 to avoid LangSmith endpoint conflicts
 _langfuse_handler = None
-if os.getenv("LANGFUSE_SECRET_KEY") or os.getenv("LANGCHAIN_API_KEY"):
+
+
+def _get_langfuse_host() -> str:
+    """Determine Langfuse host based on environment.
+    
+    In Docker (detected via DOCKER env var or /.dockerenv), use service name.
+    Otherwise, use localhost or configured host.
+    """
+    langfuse_host = os.getenv("LANGFUSE_HOST")
+    
+    if not langfuse_host:
+        # Check if running in Docker
+        is_docker = os.getenv("DOCKER") == "true" or os.path.exists("/.dockerenv")
+        langfuse_host = "langfuse:3000" if is_docker else "localhost:3000"
+    
+    return langfuse_host
+
+
+def _initialize_langfuse_handler() -> Optional[LangfuseCallbackHandler]:
+    """Initialize Langfuse callback handler if configuration is available.
+    
+    Returns:
+        LangfuseCallbackHandler if successfully initialized, None otherwise.
+    """
+    # Check if any Langfuse key is configured
+    if not (os.getenv("LANGFUSE_SECRET_KEY") or os.getenv("LANGCHAIN_API_KEY")):
+        return None
+    
     # Disable LangSmith tracing (incompatible with Langfuse)
     os.environ.pop("LANGCHAIN_TRACING_V2", None)
+    os.environ.pop("LANGCHAIN_ENDPOINT", None)
     
-    # Langfuse configuration
-    langfuse_host = os.getenv("LANGFUSE_HOST", "localhost:3000")
-    # When running in Docker, use service name if host is localhost
-    if langfuse_host == "localhost:3000" and os.path.exists("/.dockerenv"):
-        langfuse_host = "langfuse:3000"
-    
+    # Get configuration
+    langfuse_host = _get_langfuse_host()
     langfuse_secret_key = os.getenv("LANGFUSE_SECRET_KEY") or os.getenv("LANGCHAIN_API_KEY")
     langfuse_public_key = os.getenv("LANGFUSE_PUBLIC_KEY") or os.getenv("LANGCHAIN_PUBLIC_KEY", "")
     project = os.getenv("LANGCHAIN_PROJECT") or os.getenv("LANGFUSE_PROJECT", "policy-aware-voice-ai")
     
-    # Set environment variables for Langfuse SDK (reads from env automatically)
-    os.environ["LANGFUSE_SECRET_KEY"] = langfuse_secret_key
-    os.environ["LANGFUSE_HOST"] = f"http://{langfuse_host}"
-    
-    # Public key is REQUIRED - set it in environment
+    # Public key is REQUIRED
     if not langfuse_public_key:
         logger.warning(
             "LANGFUSE_PUBLIC_KEY not set! CallbackHandler requires both keys. "
             "Traces may not be sent. Set LANGCHAIN_PUBLIC_KEY or LANGFUSE_PUBLIC_KEY in .env"
         )
-        _langfuse_handler = None
-    else:
-        os.environ["LANGFUSE_PUBLIC_KEY"] = langfuse_public_key
+        return None
+    
+    # Set environment variables for Langfuse SDK (reads from env automatically)
+    langfuse_url = f"http://{langfuse_host}"
+    os.environ["LANGFUSE_SECRET_KEY"] = langfuse_secret_key
+    os.environ["LANGFUSE_PUBLIC_KEY"] = langfuse_public_key
+    os.environ["LANGFUSE_HOST"] = langfuse_url
+    os.environ["LANGFUSE_PROJECT"] = project
+    
+    try:
+        # Create callback handler - it will create internal Langfuse client from env vars
+        handler = LangfuseCallbackHandler(public_key=langfuse_public_key)
         
-        # Create Langfuse callback handler
-        # Note: CallbackHandler reads secret_key, public_key, and host from environment variables
-        # public_key is REQUIRED - handler will be disabled without it
-        try:
-            # Ensure environment variables are set before creating handler
-            # The handler reads from environment variables (LANGFUSE_SECRET_KEY, LANGFUSE_PUBLIC_KEY, LANGFUSE_HOST)
-            # We've set them above, and pass public_key explicitly as well
-            _langfuse_handler = LangfuseCallbackHandler(
-                public_key=langfuse_public_key
-            )
-            
-            # Verify handler is enabled
-            if hasattr(_langfuse_handler, 'client') and hasattr(_langfuse_handler.client, 'enabled'):
-                if not _langfuse_handler.client.enabled:
-                    logger.error(
-                        "Langfuse client is DISABLED! This means traces will NOT be sent. "
-                        "Check that LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are correct."
+        # IMPORTANT: The SDK may disable tracing during initialization if it can't verify credentials
+        # (e.g., if Langfuse info endpoint is not available). We manually enable tracing
+        # to ensure traces are sent even if the verification step fails.
+        # Note: Accessing private attributes is fragile but necessary for Langfuse 2.40.0
+        if hasattr(handler, 'client'):
+            client = handler.client
+            if hasattr(client, '_tracing_enabled'):
+                if not client._tracing_enabled:
+                    logger.warning(
+                        f"Langfuse tracing was disabled during initialization. "
+                        f"Manually enabling to ensure traces are sent. "
+                        f"If traces don't appear, check Langfuse server at {langfuse_host}"
                     )
-                    _langfuse_handler = None
+                    client._tracing_enabled = True
                 else:
-                    logger.info(f"Langfuse tracing configured for project: {project}, host: {langfuse_host}")
+                    logger.info(f"Langfuse tracing enabled for project: {project}, host: {langfuse_host}")
             else:
                 logger.info(f"Langfuse tracing configured for project: {project}, host: {langfuse_host}")
-                
-        except Exception as e:
-            logger.error(f"Failed to initialize Langfuse: {str(e)}")
-            _langfuse_handler = None
+        else:
+            logger.info(f"Langfuse tracing configured for project: {project}, host: {langfuse_host}")
+        
+        return handler
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize Langfuse: {str(e)}")
+        return None
+
+
+# Initialize Langfuse handler at module load time
+_langfuse_handler = _initialize_langfuse_handler()
 
 def get_langfuse_handler():
     """Get the Langfuse callback handler if configured."""
@@ -102,6 +145,20 @@ class GraphState(TypedDict):
     escalated: bool
 
 
+def _parse_json_from_markdown(content: str) -> str:
+    """Extract JSON from markdown code blocks.
+    
+    Handles various markdown formats:
+    - ```json\n{...}\n```
+    - ```\n{...}\n```
+    - Plain JSON
+    """
+    # Remove markdown code blocks more reliably using regex
+    content = re.sub(r'^```(?:json)?\s*', '', content, flags=re.MULTILINE)
+    content = re.sub(r'\s*```$', '', content, flags=re.MULTILINE)
+    return content.strip()
+
+
 @traceable(name="extract_intent")
 def extract_intent(state: GraphState) -> GraphState:
     """Extract intent from user input using LLM.
@@ -114,8 +171,11 @@ def extract_intent(state: GraphState) -> GraphState:
     if not user_input:
         return {**state, "intent": None}
     
+    # Get handler once to avoid double function call
+    handler = get_langfuse_handler()
+    callbacks = [handler] if handler else None
+    
     # Initialize LLM for intent extraction
-    callbacks = [get_langfuse_handler()] if get_langfuse_handler() else None
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.1, callbacks=callbacks)
     
     # Extract intent
@@ -128,18 +188,22 @@ def extract_intent(state: GraphState) -> GraphState:
         response = llm.invoke(messages, config={"callbacks": callbacks})
         content = response.content.strip()
         
-        # Parse JSON response
-        if content.startswith("```json"):
-            content = content.replace("```json", "").replace("```", "").strip()
-        elif content.startswith("```"):
-            content = content.replace("```", "").strip()
-        
-        intent_data = json.loads(content)
+        # Parse JSON response (handles markdown code blocks)
+        cleaned_content = _parse_json_from_markdown(content)
+        intent_data = json.loads(cleaned_content)
         intent = intent_data.get("intent")
+        
+        # Validate intent against allowed values
+        if intent not in VALID_INTENTS:
+            logger.warning(f"Invalid intent extracted: {intent} from input: {user_input}")
+            intent = None
         
         logger.info(f"Extracted intent: {intent} from input: {user_input}")
         return {**state, "intent": intent}
         
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse JSON from LLM response: {str(e)}. Content: {content[:100]}")
+        return {**state, "intent": None}
     except Exception as e:
         logger.error(f"Failed to extract intent: {str(e)}")
         return {**state, "intent": None}
@@ -175,11 +239,11 @@ def route_decision(state: GraphState) -> Literal["status_node", "escalate_node",
     decision = state.get("decision")
     
     if decision == "allow_status":
-        return "status_node"
+        return NODE_STATUS
     elif decision == "allow_escalate":
-        return "escalate_node"
+        return NODE_ESCALATE
     else:
-        return "deny_node"
+        return NODE_DENY
 
 
 @traceable(name="status_node")
@@ -282,31 +346,31 @@ def create_graph() -> StateGraph:
     workflow = StateGraph(GraphState)
     
     # Add nodes
-    workflow.add_node("extract_intent", extract_intent)
-    workflow.add_node("evaluate_policy", evaluate_policy_node)
-    workflow.add_node("status_node", status_node)
-    workflow.add_node("escalate_node", escalate_node)
-    workflow.add_node("deny_node", deny_node)
+    workflow.add_node(NODE_EXTRACT_INTENT, extract_intent)
+    workflow.add_node(NODE_EVALUATE_POLICY, evaluate_policy_node)
+    workflow.add_node(NODE_STATUS, status_node)
+    workflow.add_node(NODE_ESCALATE, escalate_node)
+    workflow.add_node(NODE_DENY, deny_node)
     
     # Set entry point
-    workflow.set_entry_point("extract_intent")
+    workflow.set_entry_point(NODE_EXTRACT_INTENT)
     
     # Add edges
-    workflow.add_edge("extract_intent", "evaluate_policy")
+    workflow.add_edge(NODE_EXTRACT_INTENT, NODE_EVALUATE_POLICY)
     workflow.add_conditional_edges(
-        "evaluate_policy",
+        NODE_EVALUATE_POLICY,
         route_decision,
         {
-            "status_node": "status_node",
-            "escalate_node": "escalate_node",
-            "deny_node": "deny_node"
+            NODE_STATUS: NODE_STATUS,
+            NODE_ESCALATE: NODE_ESCALATE,
+            NODE_DENY: NODE_DENY
         }
     )
     
     # All nodes end
-    workflow.add_edge("status_node", END)
-    workflow.add_edge("escalate_node", END)
-    workflow.add_edge("deny_node", END)
+    workflow.add_edge(NODE_STATUS, END)
+    workflow.add_edge(NODE_ESCALATE, END)
+    workflow.add_edge(NODE_DENY, END)
     
     return workflow.compile()
 

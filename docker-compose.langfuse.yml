@@ -31,6 +31,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - langfuse_network
 
   zookeeper:
     image: zookeeper:3.9
@@ -40,6 +42,8 @@ services:
     volumes:
       - zookeeper-data:/data
       - zookeeper-logs:/datalog
+    networks:
+      - langfuse_network
 
   clickhouse:
     image: clickhouse/clickhouse-server:latest
@@ -60,6 +64,8 @@ services:
       nofile:
         soft: 262144
         hard: 262144
+    networks:
+      - langfuse_network
 
   langfuse:
     image: langfuse/langfuse:2.40.0
@@ -85,6 +91,8 @@ services:
       - "3000:3000"
     volumes:
       - langfuse-data:/app/data
+    networks:
+      - langfuse_network
 
 volumes:
   langfuse-db-data:
@@ -92,4 +100,9 @@ volumes:
   clickhouse-data:
   zookeeper-data:
   zookeeper-logs:
+
+networks:
+  langfuse_network:
+    name: langfuse_network
+    driver: bridge
 
