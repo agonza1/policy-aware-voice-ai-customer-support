@@ -6,7 +6,7 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tools import get_case_status
+from src.tools import get_case_status
 
 
 def test_get_case_status_existing():

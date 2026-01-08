@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from loguru import logger
 
-from bot import main
+from src.bot import main
 
 # Load environment variables from .env file
 load_dotenv()
@@ -117,7 +117,7 @@ async def transfer_call(request: Request):
 </Response>'''
         else:
             # Normalize and escape the phone number for TwiML
-            from tools import normalize_phone_number
+            from src.tools import normalize_phone_number
             normalized_number = normalize_phone_number(support_phone_number)
             logger.info(f"Transferring call to {normalized_number} (normalized from {support_phone_number})")
             
